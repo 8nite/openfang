@@ -5,6 +5,17 @@ All notable changes to OpenFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-14
+
+### Added
+- **Multi-instance peer aggregation**: Configure peer instances via `peers = ["http://..."]` in config.toml. `GET /api/agents` merges agents from all peers; per-agent `GET` and `PATCH` operations are automatically routed to the instance that owns the agent.
+- **TOML system_prompt persistence**: `PATCH /api/agents/{id}/config` now writes `system_prompt` back to the agent's TOML file so changes survive daemon restarts without requiring an external proxy.
+
+### Fixed
+- `GET /api/agents` and `GET /api/agents/{id}` now return `system_prompt` in the response body.
+- `PATCH /api/agents/{id}/config` no longer returns "Agent already exists" error when updating an agent's config (name uniqueness check now excludes the agent being updated).
+- Multiple instances can now run with different `listen_addr` values from the same binary.
+
 ## [0.1.0] - 2026-02-24
 
 ### Added
