@@ -157,75 +157,106 @@ pub async fn spawn_agent(
     }
 }
 
-/// GET /api/agents — List all agents.
+/// GET /api/agents — List all agents (local + peer instances).
 pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Snapshot catalog once for enrichment
-    let catalog = state.kernel.model_catalog.read().ok();
-    let dm = &state.kernel.config.default_model;
+    // Collect all local agent data and owned config values first (no borrows across await)
+    let dm_provider = state.kernel.config.default_model.provider.clone();
+    let dm_model = state.kernel.config.default_model.model.clone();
+    let peers = state.kernel.config.peers.clone();
 
-    let agents: Vec<serde_json::Value> = state
-        .kernel
-        .registry
-        .list()
-        .into_iter()
-        .map(|e| {
-            // Resolve "default" provider/model to actual kernel defaults
-            let provider = if e.manifest.model.provider.is_empty()
-                || e.manifest.model.provider == "default"
-            {
-                dm.provider.as_str()
-            } else {
-                e.manifest.model.provider.as_str()
-            };
-            let model = if e.manifest.model.model.is_empty()
-                || e.manifest.model.model == "default"
-            {
-                dm.model.as_str()
-            } else {
-                e.manifest.model.model.as_str()
-            };
+    let mut agents: Vec<serde_json::Value> = {
+        let catalog = state.kernel.model_catalog.read().ok();
+        state
+            .kernel
+            .registry
+            .list()
+            .into_iter()
+            .map(|e| {
+                // Resolve "default" provider/model to actual kernel defaults
+                let provider = if e.manifest.model.provider.is_empty()
+                    || e.manifest.model.provider == "default"
+                {
+                    dm_provider.as_str()
+                } else {
+                    e.manifest.model.provider.as_str()
+                };
+                let model = if e.manifest.model.model.is_empty()
+                    || e.manifest.model.model == "default"
+                {
+                    dm_model.as_str()
+                } else {
+                    e.manifest.model.model.as_str()
+                };
 
-            // Enrich from catalog
-            let (tier, auth_status) = catalog
-                .as_ref()
-                .map(|cat| {
-                    let tier = cat
-                        .find_model(model)
-                        .map(|m| format!("{:?}", m.tier).to_lowercase())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let auth = cat
-                        .get_provider(provider)
-                        .map(|p| format!("{:?}", p.auth_status).to_lowercase())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    (tier, auth)
+                // Enrich from catalog
+                let (tier, auth_status) = catalog
+                    .as_ref()
+                    .map(|cat| {
+                        let tier = cat
+                            .find_model(model)
+                            .map(|m| format!("{:?}", m.tier).to_lowercase())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let auth = cat
+                            .get_provider(provider)
+                            .map(|p| format!("{:?}", p.auth_status).to_lowercase())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        (tier, auth)
+                    })
+                    .unwrap_or(("unknown".to_string(), "unknown".to_string()));
+
+                let ready = matches!(e.state, openfang_types::agent::AgentState::Running)
+                    && auth_status != "missing";
+
+                serde_json::json!({
+                    "id": e.id.to_string(),
+                    "name": e.name,
+                    "state": format!("{:?}", e.state),
+                    "mode": e.mode,
+                    "created_at": e.created_at.to_rfc3339(),
+                    "last_active": e.last_active.to_rfc3339(),
+                    "model_provider": provider,
+                    "model_name": model,
+                    "model_tier": tier,
+                    "auth_status": auth_status,
+                    "ready": ready,
+                    "profile": e.manifest.profile,
+                    "system_prompt": e.manifest.model.system_prompt,
+                    "identity": {
+                        "emoji": e.identity.emoji,
+                        "avatar_url": e.identity.avatar_url,
+                        "color": e.identity.color,
+                    },
                 })
-                .unwrap_or(("unknown".to_string(), "unknown".to_string()));
-
-            let ready = matches!(e.state, openfang_types::agent::AgentState::Running)
-                && auth_status != "missing";
-
-            serde_json::json!({
-                "id": e.id.to_string(),
-                "name": e.name,
-                "state": format!("{:?}", e.state),
-                "mode": e.mode,
-                "created_at": e.created_at.to_rfc3339(),
-                "last_active": e.last_active.to_rfc3339(),
-                "model_provider": provider,
-                "model_name": model,
-                "model_tier": tier,
-                "auth_status": auth_status,
-                "ready": ready,
-                "profile": e.manifest.profile,
-                "system_prompt": e.manifest.model.system_prompt,
-                "identity": {
-                    "emoji": e.identity.emoji,
-                    "avatar_url": e.identity.avatar_url,
-                    "color": e.identity.color,
-                },
             })
-        })
-        .collect();
+            .collect()
+        // catalog guard dropped here at end of block
+    };
+
+    // Merge agents from peer instances (deduplicate by id)
+    if !peers.is_empty() {
+        let local_ids: std::collections::HashSet<String> = agents
+            .iter()
+            .filter_map(|a| a["id"].as_str().map(|s| s.to_string()))
+            .collect();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        for peer in &peers {
+            let url = format!("{}/api/agents", peer.trim_end_matches('/'));
+            if let Ok(resp) = client.get(&url).send().await {
+                if let Ok(peer_agents) = resp.json::<Vec<serde_json::Value>>().await {
+                    for agent in peer_agents {
+                        if let Some(id) = agent["id"].as_str() {
+                            if !local_ids.contains(id) {
+                                agents.push(agent);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Json(agents)
 }
@@ -1245,6 +1276,7 @@ pub async fn get_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let peers = state.kernel.config.peers.clone();
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -1258,6 +1290,23 @@ pub async fn get_agent(
     let entry = match state.kernel.registry.get(agent_id) {
         Some(e) => e,
         None => {
+            // Try peer instances before returning 404
+            if !peers.is_empty() {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                for peer in &peers {
+                    let url = format!("{}/api/agents/{}", peer.trim_end_matches('/'), id);
+                    if let Ok(resp) = client.get(&url).send().await {
+                        if resp.status().is_success() {
+                            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                return (StatusCode::OK, Json(body));
+                            }
+                        }
+                    }
+                }
+            }
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": "Agent not found"})),
@@ -8286,7 +8335,7 @@ pub async fn update_agent_identity(
 // ---------------------------------------------------------------------------
 
 /// Request body for patching agent config (name, description, prompt, identity, model).
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct PatchAgentConfigRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -8319,6 +8368,35 @@ pub async fn patch_agent_config(
             );
         }
     };
+
+    // If agent is not local, forward the PATCH to the peer that owns it
+    let peers = state.kernel.config.peers.clone();
+    if state.kernel.registry.get(agent_id).is_none() && !peers.is_empty() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        for peer in &peers {
+            let check_url = format!("{}/api/agents/{}", peer.trim_end_matches('/'), id);
+            if let Ok(check_resp) = client.get(&check_url).send().await {
+                if check_resp.status().is_success() {
+                    let patch_url = format!("{}/api/agents/{}/config", peer.trim_end_matches('/'), id);
+                    let body = serde_json::to_value(&req).unwrap_or_default();
+                    if let Ok(patch_resp) = client.patch(&patch_url).json(&body).send().await {
+                        let status = patch_resp.status();
+                        let resp_body: serde_json::Value =
+                            patch_resp.json().await.unwrap_or_default();
+                        return (
+                            StatusCode::from_u16(status.as_u16())
+                                .unwrap_or(StatusCode::OK),
+                            Json(resp_body),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     // Input length limits
     const MAX_NAME_LEN: usize = 256;
@@ -8521,6 +8599,45 @@ pub async fn patch_agent_config(
     if let Some(entry) = state.kernel.registry.get(agent_id) {
         if let Err(e) = state.kernel.memory.save_agent(&entry) {
             tracing::warn!("Failed to persist agent config update: {e}");
+        }
+
+        // Write system_prompt back to agent TOML so it overrides DB on next restart
+        if let Some(ref new_prompt) = req.system_prompt {
+            let toml_path = state
+                .kernel
+                .config
+                .home_dir
+                .join("agents")
+                .join(entry.name.to_lowercase())
+                .join("agent.toml");
+            if toml_path.exists() {
+                if let Ok(contents) = std::fs::read_to_string(&toml_path) {
+                    let marker = "system_prompt = \"\"\"";
+                    let updated = if let Some(start) = contents.find(marker) {
+                        let after = &contents[start + marker.len()..];
+                        if let Some(end_offset) = after.find("\n\"\"\"") {
+                            let end = start + marker.len() + end_offset + "\n\"\"\"".len();
+                            Some(format!(
+                                "{}system_prompt = \"\"\"\n{}\n\"\"\"{}",
+                                &contents[..start],
+                                new_prompt,
+                                &contents[end..]
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(new_contents) = updated {
+                        if let Err(e) = std::fs::write(&toml_path, new_contents) {
+                            tracing::warn!("Failed to write system_prompt to TOML: {e}");
+                        } else {
+                            tracing::info!("Updated system_prompt in {}", toml_path.display());
+                        }
+                    }
+                }
+            }
         }
     }
 

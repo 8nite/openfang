@@ -1099,6 +1099,12 @@ pub struct KernelConfig {
     /// Defaults to `~/.openfang/workflows`. Set to empty string to disable.
     #[serde(default)]
     pub workflows_dir: Option<PathBuf>,
+    /// Peer OpenFang instance URLs for multi-instance agent aggregation.
+    /// GET /api/agents merges agents from all peers; per-agent operations are
+    /// routed to the instance that owns the agent.
+    /// Example: ["http://127.0.0.1:4201"]
+    #[serde(default)]
+    pub peers: Vec<String>,
 }
 
 /// Dashboard authentication (username/password login).
@@ -1308,6 +1314,7 @@ impl Default for KernelConfig {
             oauth: OAuthConfig::default(),
             auth: AuthConfig::default(),
             workflows_dir: None,
+            peers: Vec::new(),
         }
     }
 }
