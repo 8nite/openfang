@@ -8614,6 +8614,7 @@ pub async fn patch_agent_config(
                 if let Ok(contents) = std::fs::read_to_string(&toml_path) {
                     let marker = "system_prompt = \"\"\"";
                     let updated = if let Some(start) = contents.find(marker) {
+                        // Replace existing system_prompt = """..."""
                         let after = &contents[start + marker.len()..];
                         if let Some(end_offset) = after.find("\n\"\"\"") {
                             let end = start + marker.len() + end_offset + "\n\"\"\"".len();
@@ -8626,6 +8627,15 @@ pub async fn patch_agent_config(
                         } else {
                             None
                         }
+                    } else if let Some(model_pos) = contents.find("\n[model]") {
+                        // No system_prompt yet — insert after [model] section header
+                        let insert_at = model_pos + "\n[model]".len();
+                        Some(format!(
+                            "{}\nsystem_prompt = \"\"\"\n{}\n\"\"\"{}",
+                            &contents[..insert_at],
+                            new_prompt,
+                            &contents[insert_at..]
+                        ))
                     } else {
                         None
                     };
