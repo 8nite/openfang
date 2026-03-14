@@ -1432,12 +1432,18 @@ decay_rate = 0.05
 }
 
 fn cmd_start(config: Option<PathBuf>) {
-    if let Some(base) = find_daemon() {
-        ui::error_with_fix(
-            &format!("Daemon already running at {base}"),
-            "Use `openfang status` to check it, or stop it first",
-        );
-        std::process::exit(1);
+    // When a custom config is provided the caller is intentionally starting a
+    // second instance on a different port.  Skip the global daemon check so
+    // that the per-port lock in the API server handles conflict detection.
+    let is_custom_config = config.is_some();
+    if !is_custom_config {
+        if let Some(base) = find_daemon() {
+            ui::error_with_fix(
+                &format!("Daemon already running at {base}"),
+                "Use `openfang status` to check it, or stop it first",
+            );
+            std::process::exit(1);
+        }
     }
 
     ui::banner();
@@ -1456,7 +1462,15 @@ fn cmd_start(config: Option<PathBuf>) {
         };
 
         let listen_addr = kernel.config.api_listen.clone();
-        let daemon_info_path = kernel.config.home_dir.join("daemon.json");
+        // Use a port-specific daemon info file so multiple instances can
+        // coexist.  The primary instance (no custom config) keeps the legacy
+        // "daemon.json" name so existing tooling continues to work.
+        let daemon_info_path = if is_custom_config {
+            let port = listen_addr.split(':').last().unwrap_or("secondary");
+            kernel.config.home_dir.join(format!("daemon_{port}.json"))
+        } else {
+            kernel.config.home_dir.join("daemon.json")
+        };
         let provider = kernel.config.default_model.provider.clone();
         let model = kernel.config.default_model.model.clone();
         let agent_count = kernel.registry.count();
