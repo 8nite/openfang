@@ -248,8 +248,11 @@ impl AgentRegistry {
 
     /// Update an agent's name (also updates the name index).
     pub fn update_name(&self, id: AgentId, new_name: String) -> OpenFangResult<()> {
-        if self.name_index.contains_key(&new_name) {
-            return Err(OpenFangError::AgentAlreadyExists(new_name));
+        // Allow the update if the name is already taken by this same agent (no-op rename).
+        if let Some(existing_id) = self.name_index.get(&new_name) {
+            if *existing_id != id {
+                return Err(OpenFangError::AgentAlreadyExists(new_name));
+            }
         }
         let mut entry = self
             .agents

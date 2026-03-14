@@ -217,6 +217,7 @@ pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 "auth_status": auth_status,
                 "ready": ready,
                 "profile": e.manifest.profile,
+                "system_prompt": e.manifest.model.system_prompt,
                 "identity": {
                     "emoji": e.identity.emoji,
                     "avatar_url": e.identity.avatar_url,
@@ -1283,6 +1284,7 @@ pub async fn get_agent(
                 "network": entry.manifest.capabilities.network,
             },
             "description": entry.manifest.description,
+            "system_prompt": entry.manifest.model.system_prompt,
             "tags": entry.manifest.tags,
             "identity": {
                 "emoji": entry.identity.emoji,
