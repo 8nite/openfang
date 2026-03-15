@@ -9835,6 +9835,70 @@ pub async fn create_cron_job(
     }
 }
 
+/// PATCH /api/cron/jobs/{id} — Update a cron job's name, message, or schedule.
+/// Internally removes and re-adds the job, preserving the original ID.
+pub async fn update_cron_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid job ID"})),
+            );
+        }
+    };
+    let job_id = openfang_types::scheduler::CronJobId(uuid);
+    let existing = match state.kernel.cron_scheduler.get_job(job_id) {
+        Some(j) => j,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Job not found"})),
+            );
+        }
+    };
+
+    // Build updated job: start from existing, apply only provided fields
+    let new_name = body["name"].as_str().unwrap_or(&existing.name).to_string();
+    let new_message = body["message"].as_str().map(|s| s.to_string());
+    let new_action = if let Some(msg) = new_message {
+        match &existing.action {
+            openfang_types::scheduler::CronAction::AgentTurn { model_override, timeout_secs, .. } => {
+                openfang_types::scheduler::CronAction::AgentTurn {
+                    message: msg,
+                    model_override: model_override.clone(),
+                    timeout_secs: *timeout_secs,
+                }
+            }
+            other => other.clone(),
+        }
+    } else {
+        existing.action.clone()
+    };
+
+    // Remove old job, re-add with same ID and updated fields
+    let _ = state.kernel.cron_scheduler.remove_job(job_id);
+    let mut updated = existing.clone();
+    updated.name = new_name;
+    updated.action = new_action;
+    updated.id = job_id; // preserve original ID
+
+    match state.kernel.cron_scheduler.add_job(updated, false) {
+        Ok(_) => {
+            let _ = state.kernel.cron_scheduler.persist();
+            (StatusCode::OK, Json(serde_json::json!({"status": "updated", "id": id})))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
 /// DELETE /api/cron/jobs/{id} — Delete a cron job.
 pub async fn delete_cron_job(
     State(state): State<Arc<AppState>>,

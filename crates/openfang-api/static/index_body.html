@@ -1720,6 +1720,7 @@
                               <span x-show="runningJobId !== job.id">Run</span>
                               <span x-show="runningJobId === job.id">...</span>
                             </button>
+                            <button class="btn btn-ghost btn-sm" @click="openEdit(job)">Edit</button>
                             <button class="btn btn-ghost btn-sm" @click="toggleJob(job)" x-text="job.enabled ? 'Pause' : 'Enable'"></button>
                             <button class="btn btn-danger btn-sm" @click="deleteJob(job)">Del</button>
                           </div>
@@ -1795,6 +1796,33 @@
                   <button class="btn btn-primary btn-block mt-4" @click="createJob()" :disabled="creating">
                     <span x-show="!creating">Create Schedule</span>
                     <span x-show="creating">Creating...</span>
+                  </button>
+                </div>
+              </div>
+            </template>
+
+            <!-- Edit Job Modal -->
+            <template x-if="editingJob">
+              <div class="modal-overlay" @click.self="closeEdit()" @keydown.escape.window="closeEdit()">
+                <div class="modal">
+                  <div class="modal-header">
+                    <h3>Edit Scheduled Job</h3>
+                    <button class="modal-close" @click="closeEdit()">&times;</button>
+                  </div>
+
+                  <div class="form-group">
+                    <label>Job Name</label>
+                    <input class="form-input" x-model="editForm.name" placeholder="Job name">
+                  </div>
+
+                  <div class="form-group">
+                    <label>Prompt / Message</label>
+                    <textarea class="form-input" x-model="editForm.message" rows="10" placeholder="Message sent to the agent on each run..." style="font-family:monospace;font-size:12px;resize:vertical"></textarea>
+                  </div>
+
+                  <button class="btn btn-primary btn-block mt-4" @click="saveEdit()" :disabled="saving">
+                    <span x-show="!saving">Save Changes</span>
+                    <span x-show="saving">Saving...</span>
                   </button>
                 </div>
               </div>

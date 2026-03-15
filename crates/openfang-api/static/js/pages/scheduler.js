@@ -33,6 +33,11 @@ function schedulerPage() {
     // -- Run Now state --
     runningJobId: '',
 
+    // -- Edit Job state --
+    editingJob: null,
+    editForm: { name: '', message: '' },
+    saving: false,
+
     // Cron presets
     cronPresets: [
       { label: 'Every minute', cron: '* * * * *' },
@@ -196,6 +201,34 @@ function schedulerPage() {
           OpenFangToast.error('Failed to delete schedule: ' + (e.message || e));
         }
       });
+    },
+
+    openEdit(job) {
+      this.editingJob = job;
+      this.editForm = { name: job.name || '', message: job.message || '' };
+    },
+
+    closeEdit() {
+      this.editingJob = null;
+      this.editForm = { name: '', message: '' };
+    },
+
+    async saveEdit() {
+      if (!this.editingJob) return;
+      this.saving = true;
+      try {
+        await OpenFangAPI.patch('/api/cron/jobs/' + this.editingJob.id, {
+          name: this.editForm.name,
+          message: this.editForm.message
+        });
+        this.editingJob.name = this.editForm.name;
+        this.editingJob.message = this.editForm.message;
+        OpenFangToast.success('Job updated');
+        this.closeEdit();
+      } catch(e) {
+        OpenFangToast.error('Failed to save: ' + (e.message || e));
+      }
+      this.saving = false;
     },
 
     async runNow(job) {
