@@ -75,6 +75,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(result.response)
     }
 
+    async fn send_message_verbose(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<(String, Vec<(String, String)>), String> {
+        let result = self
+            .kernel
+            .send_message(agent_id, message)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok((result.response, result.tool_calls))
+    }
+
     async fn send_message_with_blocks(
         &self,
         agent_id: AgentId,

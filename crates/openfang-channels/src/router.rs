@@ -40,6 +40,8 @@ pub struct AgentRouter {
     broadcast: Mutex<BroadcastConfig>,
     /// Agent name -> AgentId cache for binding resolution.
     agent_name_cache: DashMap<String, AgentId>,
+    /// Per-user verbose mode (platform_id -> enabled).
+    verbose_users: DashMap<String, bool>,
 }
 
 impl AgentRouter {
@@ -53,7 +55,18 @@ impl AgentRouter {
             bindings: Mutex::new(Vec::new()),
             broadcast: Mutex::new(BroadcastConfig::default()),
             agent_name_cache: DashMap::new(),
+            verbose_users: DashMap::new(),
         }
+    }
+
+    /// Enable or disable verbose mode for a user (keyed by platform_id).
+    pub fn set_verbose(&self, user_key: String, enabled: bool) {
+        self.verbose_users.insert(user_key, enabled);
+    }
+
+    /// Returns true if verbose mode is enabled for this user.
+    pub fn is_verbose(&self, user_key: &str) -> bool {
+        self.verbose_users.get(user_key).map(|v| *v).unwrap_or(false)
     }
 
     /// Set the system-wide default agent.

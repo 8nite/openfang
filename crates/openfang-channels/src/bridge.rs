@@ -29,6 +29,19 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Send a message to an agent and get the text response.
     async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String>;
 
+    /// Send a message and return (response, tool_call_summaries) for verbose output.
+    ///
+    /// Default implementation falls back to `send_message()` with an empty tool list.
+    /// Override to return actual tool call data (name, truncated_output) pairs.
+    async fn send_message_verbose(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<(String, Vec<(String, String)>), String> {
+        let response = self.send_message(agent_id, message).await?;
+        Ok((response, vec![]))
+    }
+
     /// Send a message with structured content blocks (text + images) to an agent.
     ///
     /// Default implementation extracts text from blocks and falls back to `send_message()`.
@@ -765,12 +778,30 @@ async fn dispatch_message(
     }
 
     // Send to agent and relay response
-    match handle.send_message(agent_id, &text).await {
-        Ok(response) => {
+    let verbose = router.is_verbose(&message.sender.platform_id);
+    let send_result = if verbose {
+        handle.send_message_verbose(agent_id, &text).await
+            .map(|(resp, tools)| (resp, tools))
+    } else {
+        handle.send_message(agent_id, &text).await
+            .map(|resp| (resp, vec![]))
+    };
+    match send_result {
+        Ok((response, tool_calls)) => {
             if lifecycle_reactions {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             }
-            send_response(adapter, &message.sender, response, thread_id, output_format).await;
+            let final_response = if verbose && !tool_calls.is_empty() {
+                let mut out = response;
+                out.push_str("\n\n🔧 *Tools used:*");
+                for (name, output) in &tool_calls {
+                    out.push_str(&format!("\n• `{name}`: {output}"));
+                }
+                out
+            } else {
+                response
+            };
+            send_response(adapter, &message.sender, final_response, thread_id, output_format).await;
             handle
                 .record_delivery(agent_id, ct_str, &message.sender.platform_id, true, None, thread_id)
                 .await;
@@ -1069,6 +1100,7 @@ async fn handle_command(
              /stop - cancel current agent run\n\
              /usage - show session token usage and cost\n\
              /think [on|off] - toggle extended thinking\n\
+             /verbose [on|off] - show/hide tool call details\n\
              \n\
              Info:\n\
              /models - list available AI models\n\
@@ -1100,6 +1132,19 @@ async fn handle_command(
              /help - show this help"
             .to_string(),
         "status" => handle.uptime_info().await,
+        "verbose" => {
+            let new_state = match args.first().map(|s| s.as_str()) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => !router.is_verbose(&sender.platform_id),
+            };
+            router.set_verbose(sender.platform_id.clone(), new_state);
+            if new_state {
+                "Verbose mode ON — tool call details will be shown after each response.".to_string()
+            } else {
+                "Verbose mode OFF — tool call details hidden.".to_string()
+            }
+        }
         "agents" => {
             let agents = handle.list_agents().await.unwrap_or_default();
             if agents.is_empty() {

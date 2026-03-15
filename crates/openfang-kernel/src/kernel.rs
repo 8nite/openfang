@@ -2006,6 +2006,7 @@ impl OpenFangKernel {
             cost_usd: None,
             silent: false,
             directives: Default::default(),
+            tool_calls: vec![],
         })
     }
 
@@ -2066,6 +2067,7 @@ impl OpenFangKernel {
             iterations: 1,
             silent: false,
             directives: Default::default(),
+            tool_calls: vec![],
         })
     }
 

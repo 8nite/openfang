@@ -91,7 +91,7 @@ pub enum LoopPhase {
 pub type PhaseCallback = Arc<dyn Fn(LoopPhase) + Send + Sync>;
 
 /// Result of an agent loop execution.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AgentLoopResult {
     /// The final text response from the agent.
     pub response: String,
@@ -105,6 +105,9 @@ pub struct AgentLoopResult {
     pub silent: bool,
     /// Reply directives extracted from the agent's response.
     pub directives: openfang_types::message::ReplyDirectives,
+    /// Tool calls executed during this run: (tool_name, truncated_output).
+    /// Populated only by `run_agent_loop` (not the streaming variant).
+    pub tool_calls: Vec<(String, String)>,
 }
 
 /// Run the agent execution loop for a single user message.
@@ -294,6 +297,8 @@ pub async fn run_agent_loop(
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
     let mut any_tools_executed = false;
+    // Accumulates tool call summaries for verbose channel output.
+    let mut tool_calls_log: Vec<(String, String)> = Vec::new();
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -398,6 +403,7 @@ pub async fn run_agent_loop(
                             current_thread: parsed_directives.current_thread,
                             silent: true,
                         },
+                        tool_calls: tool_calls_log,
                     });
                 }
 
@@ -533,6 +539,7 @@ pub async fn run_agent_loop(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+                    tool_calls: tool_calls_log,
                 });
             }
             StopReason::ToolUse => {
@@ -709,6 +716,12 @@ pub async fn run_agent_loop(
                         content
                     };
 
+                    // Record for verbose channel output (first 300 chars is enough for a preview)
+                    tool_calls_log.push((
+                        tool_call.name.clone(),
+                        final_content.chars().take(300).collect(),
+                    ));
+
                     tool_result_blocks.push(ContentBlock::ToolResult {
                         tool_use_id: result.tool_use_id,
                         tool_name: tool_call.name.clone(),
@@ -804,6 +817,7 @@ pub async fn run_agent_loop(
                         cost_usd: None,
                         silent: false,
                         directives: Default::default(),
+                        tool_calls: tool_calls_log,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1374,6 +1388,7 @@ pub async fn run_agent_loop_streaming(
                             current_thread: parsed_directives_s.current_thread,
                             silent: true,
                         },
+                        tool_calls: vec![],
                     });
                 }
 
@@ -1508,6 +1523,7 @@ pub async fn run_agent_loop_streaming(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+                    tool_calls: vec![],
                 });
             }
             StopReason::ToolUse => {
@@ -1786,6 +1802,7 @@ pub async fn run_agent_loop_streaming(
                         cost_usd: None,
                         silent: false,
                         directives: Default::default(),
+                        tool_calls: vec![],
                     });
                 }
                 let text = response.text();
