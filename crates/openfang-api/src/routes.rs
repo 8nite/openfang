@@ -9749,11 +9749,15 @@ pub async fn get_agent_deliveries(
 // ---------------------------------------------------------------------------
 
 /// GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.
+/// Also merges jobs from peer instances (deduplicated by id).
 pub async fn list_cron_jobs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let jobs = if let Some(agent_id_str) = params.get("agent_id") {
+    let peers = state.kernel.config.peers.clone();
+    let agent_id_filter = params.get("agent_id").cloned();
+
+    let local_jobs = if let Some(ref agent_id_str) = agent_id_filter {
         match uuid::Uuid::parse_str(agent_id_str) {
             Ok(uuid) => {
                 let aid = AgentId(uuid);
@@ -9769,11 +9773,44 @@ pub async fn list_cron_jobs(
     } else {
         state.kernel.cron_scheduler.list_all_jobs()
     };
-    let total = jobs.len();
-    let jobs_json: Vec<serde_json::Value> = jobs
+
+    let mut jobs_json: Vec<serde_json::Value> = local_jobs
         .into_iter()
         .map(|j| serde_json::to_value(&j).unwrap_or_default())
         .collect();
+
+    // Merge cron jobs from peer instances (deduplicate by id)
+    if !peers.is_empty() {
+        let local_ids: std::collections::HashSet<String> = jobs_json
+            .iter()
+            .filter_map(|j| j["id"].as_str().map(|s| s.to_string()))
+            .collect();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        for peer in &peers {
+            let mut url = format!("{}/api/cron/jobs", peer.trim_end_matches('/'));
+            if let Some(ref aid) = agent_id_filter {
+                url = format!("{}?agent_id={}", url, aid);
+            }
+            if let Ok(resp) = client.get(&url).send().await {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    if let Some(peer_jobs) = data["jobs"].as_array() {
+                        for job in peer_jobs {
+                            if let Some(id) = job["id"].as_str() {
+                                if !local_ids.contains(id) {
+                                    jobs_json.push(job.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let total = jobs_json.len();
     (
         StatusCode::OK,
         Json(serde_json::json!({"jobs": jobs_json, "total": total})),
