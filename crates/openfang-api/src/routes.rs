@@ -9880,22 +9880,36 @@ pub async fn update_cron_job(
         existing.action.clone()
     };
 
-    // Remove old job, re-add with same ID and updated fields
-    let _ = state.kernel.cron_scheduler.remove_job(job_id);
+    // Build the updated job before touching scheduler state
     let mut updated = existing.clone();
     updated.name = new_name;
     updated.action = new_action;
     updated.id = job_id; // preserve original ID
 
+    // Validate before removing, so we never lose the job on bad input
+    if let Err(e) = updated.validate(0) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Validation failed: {e}")})),
+        );
+    }
+
+    // Safe to swap: remove then re-add; restore on failure
+    let _ = state.kernel.cron_scheduler.remove_job(job_id);
     match state.kernel.cron_scheduler.add_job(updated, false) {
         Ok(_) => {
             let _ = state.kernel.cron_scheduler.persist();
             (StatusCode::OK, Json(serde_json::json!({"status": "updated", "id": id})))
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => {
+            // Re-insert the original to avoid data loss
+            let _ = state.kernel.cron_scheduler.add_job(existing, false);
+            let _ = state.kernel.cron_scheduler.persist();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
+        }
     }
 }
 

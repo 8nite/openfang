@@ -942,9 +942,10 @@ impl OpenFangKernel {
             }));
         }
 
-        // Initialize cron scheduler
+        // Initialize cron scheduler — use data_dir so each instance has its own
+        // cron_jobs.json, avoiding cross-instance overwrites in multi-instance setups.
         let cron_scheduler =
-            crate::cron::CronScheduler::new(&config.home_dir, config.max_cron_jobs);
+            crate::cron::CronScheduler::new(&config.data_dir, config.max_cron_jobs);
         match cron_scheduler.load() {
             Ok(count) => {
                 if count > 0 {
