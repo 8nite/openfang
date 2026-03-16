@@ -132,9 +132,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         use openfang_runtime::llm_driver::StreamEvent;
         use openfang_types::event::ChannelBusEvent;
 
+        let kernel_handle: std::sync::Arc<dyn openfang_runtime::kernel_handle::KernelHandle> =
+            self.kernel.clone();
         let (mut rx, task) = self
             .kernel
-            .send_message_streaming(agent_id, message, None)
+            .send_message_streaming(agent_id, message, Some(kernel_handle))
             .map_err(|e| format!("{e}"))?;
 
         let kernel = self.kernel.clone();
