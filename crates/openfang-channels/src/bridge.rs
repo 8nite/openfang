@@ -42,6 +42,19 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Ok((response, vec![]))
     }
 
+    /// Send a message with real-time phase progress notifications.
+    ///
+    /// `progress_tx` receives a string for each tool call started (e.g. "web_search").
+    /// Drop the sender to signal completion. Default impl ignores the channel.
+    async fn send_message_with_progress(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        _progress_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<String, String> {
+        self.send_message(agent_id, message).await
+    }
+
     /// Send a message with structured content blocks (text + images) to an agent.
     ///
     /// Default implementation extracts text from blocks and falls back to `send_message()`.
@@ -354,7 +367,7 @@ impl BridgeManager {
                                         &message,
                                         &handle,
                                         &router,
-                                        adapter.as_ref(),
+                                        adapter.clone(),
                                         &rate_limiter,
                                     ).await;
                                 });
@@ -454,9 +467,12 @@ async fn dispatch_message(
     message: &ChannelMessage,
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
-    adapter: &dyn ChannelAdapter,
+    adapter: Arc<dyn ChannelAdapter>,
     rate_limiter: &ChannelRateLimiter,
 ) {
+    // Keep an Arc clone for spawning the verbose progress task; shadow with &dyn for existing code.
+    let adapter_arc = adapter.clone();
+    let adapter: &dyn ChannelAdapter = &*adapter;
     let ct_str = channel_type_str(&message.channel);
 
     // Fetch per-channel overrides (if configured)
@@ -780,28 +796,36 @@ async fn dispatch_message(
     // Send to agent and relay response
     let verbose = router.is_verbose(&message.sender.platform_id);
     let send_result = if verbose {
-        handle.send_message_verbose(agent_id, &text).await
-            .map(|(resp, tools)| (resp, tools))
+        // Spawn a progress task: each tool call name arrives on progress_rx and is
+        // sent as a Telegram message immediately, giving real-time visibility.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
+        let progress_adapter = adapter_arc.clone();
+        let progress_user = message.sender.clone();
+        let progress_thread = thread_id.map(|s| s.to_string());
+        tokio::spawn(async move {
+            while let Some(tool_name) = progress_rx.recv().await {
+                let msg = format!("⚙️ <code>{tool_name}</code>…");
+                let content = ChannelContent::Text(msg);
+                if let Some(ref tid) = progress_thread {
+                    let _ = progress_adapter.send_in_thread(&progress_user, content, tid).await;
+                } else {
+                    let _ = progress_adapter.send(&progress_user, content).await;
+                }
+            }
+        });
+        handle
+            .send_message_with_progress(agent_id, &text, progress_tx)
+            .await
     } else {
         handle.send_message(agent_id, &text).await
-            .map(|resp| (resp, vec![]))
     };
     match send_result {
-        Ok((response, tool_calls)) => {
+        Ok(response) => {
             if lifecycle_reactions {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             }
-            let final_response = if verbose && !tool_calls.is_empty() {
-                let mut out = response;
-                out.push_str("\n\n🔧 *Tools used:*");
-                for (name, output) in &tool_calls {
-                    out.push_str(&format!("\n• `{name}`: {output}"));
-                }
-                out
-            } else {
-                response
-            };
-            send_response(adapter, &message.sender, final_response, thread_id, output_format).await;
+            send_response(adapter, &message.sender, response, thread_id, output_format).await;
             handle
                 .record_delivery(agent_id, ct_str, &message.sender.platform_id, true, None, thread_id)
                 .await;

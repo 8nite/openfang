@@ -88,6 +88,27 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok((result.response, result.tool_calls))
     }
 
+    async fn send_message_with_progress(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<String, String> {
+        let phase_cb: openfang_runtime::agent_loop::PhaseCallback =
+            std::sync::Arc::new(move |phase| {
+                use openfang_runtime::agent_loop::LoopPhase;
+                if let LoopPhase::ToolUse { tool_name } = phase {
+                    let _ = progress_tx.send(tool_name);
+                }
+            });
+        let result = self
+            .kernel
+            .send_message_with_phase_callback(agent_id, message, phase_cb)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(result.response)
+    }
+
     async fn send_message_with_blocks(
         &self,
         agent_id: AgentId,

@@ -1468,7 +1468,7 @@ impl OpenFangKernel {
             self.execute_python_agent(&entry, agent_id, message).await
         } else {
             // Default: LLM agent loop (builtin:chat or any unrecognized module)
-            self.execute_llm_agent(&entry, agent_id, message, kernel_handle, content_blocks)
+            self.execute_llm_agent(&entry, agent_id, message, kernel_handle, content_blocks, None)
                 .await
         };
 
@@ -1505,6 +1505,59 @@ impl OpenFangKernel {
                 // Record the failure in supervisor for health reporting
                 self.supervisor.record_panic();
                 warn!(agent_id = %agent_id, error = %e, "Agent loop failed — recorded in supervisor");
+                Err(e)
+            }
+        }
+    }
+
+    /// Send a message to an agent with a phase progress callback.
+    ///
+    /// The callback fires on every `LoopPhase` transition (Thinking, ToolUse, Done, etc.).
+    /// Used by channel bridges to send intermediate progress messages (e.g. Telegram verbose mode).
+    pub async fn send_message_with_phase_callback(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        phase_callback: openfang_runtime::agent_loop::PhaseCallback,
+    ) -> KernelResult<AgentLoopResult> {
+        let lock = self
+            .agent_msg_locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        self.scheduler
+            .check_quota(agent_id)
+            .map_err(KernelError::OpenFang)?;
+
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::OpenFang(OpenFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+
+        let result = if entry.manifest.module.starts_with("wasm:") {
+            self.execute_wasm_agent(&entry, message, handle).await
+        } else if entry.manifest.module.starts_with("python:") {
+            self.execute_python_agent(&entry, agent_id, message).await
+        } else {
+            self.execute_llm_agent(&entry, agent_id, message, handle, None, Some(phase_callback))
+                .await
+        };
+
+        match result {
+            Ok(result) => {
+                self.scheduler.record_usage(agent_id, &result.total_usage);
+                let _ = self.registry.set_state(agent_id, AgentState::Running);
+                Ok(result)
+            }
+            Err(e) => {
+                self.supervisor.record_panic();
                 Err(e)
             }
         }
@@ -2079,6 +2132,7 @@ impl OpenFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<openfang_types::message::ContentBlock>>,
+        phase_callback: Option<openfang_runtime::agent_loop::PhaseCallback>,
     ) -> KernelResult<AgentLoopResult> {
         // Check metering quota before starting
         self.metering
@@ -2325,7 +2379,7 @@ impl OpenFangKernel {
             Some(&self.browser_ctx),
             self.embedding_driver.as_deref(),
             manifest.workspace.as_deref(),
-            None, // on_phase callback
+            phase_callback.as_ref(),
             Some(&self.media_engine),
             if self.config.tts.enabled {
                 Some(&self.tts_engine)
