@@ -3951,6 +3951,12 @@ impl OpenFangKernel {
                                 ..
                             } => {
                                 tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
+                                // Reset session before each cron turn so context doesn't grow
+                                // unboundedly across runs. reset_session saves a memory summary
+                                // first, so agent knowledge is preserved.
+                                if let Err(e) = kernel.reset_session(agent_id) {
+                                    tracing::warn!(job = %job_name, agent = %agent_id, error = %e, "Cron: failed to reset session before turn");
+                                }
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
                                 let delivery = job.delivery.clone();
