@@ -326,6 +326,45 @@ impl Event {
     }
 }
 
+/// Events published to the per-agent channel bus.
+///
+/// The bus carries live activity from messaging channels (Telegram, WhatsApp, etc.)
+/// to any subscribers — dashboard WebSocket connections, logging, etc.
+/// This allows the dashboard to mirror channel conversations in real time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChannelBusEvent {
+    /// A user message arrived from a messaging channel.
+    UserMessage {
+        /// Channel name (e.g. "telegram", "whatsapp").
+        channel: String,
+        /// Display name of the sender.
+        sender_name: String,
+        /// Message text.
+        text: String,
+    },
+    /// A tool call started during the agent run.
+    ToolStarted {
+        /// Tool name.
+        name: String,
+    },
+    /// Incremental text chunk from the agent response.
+    TextDelta {
+        /// Text fragment.
+        text: String,
+    },
+    /// Agent finished responding.
+    Done {
+        /// Full response text.
+        response: String,
+    },
+    /// Agent run failed.
+    Error {
+        /// Error description.
+        message: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

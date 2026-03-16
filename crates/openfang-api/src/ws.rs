@@ -291,6 +291,62 @@ async fn handle_agent_ws(
         }
     });
 
+    // Spawn background task: forward channel bus events (channel messages, tool activity)
+    // to this WebSocket so the dashboard mirrors live channel activity.
+    let sender_clone = Arc::clone(&sender);
+    let mut bus_rx = state.kernel.subscribe_channel_bus(agent_id);
+    let channel_bus_handle = tokio::spawn(async move {
+        loop {
+            match bus_rx.recv().await {
+                Ok(event) => {
+                    use openfang_types::event::ChannelBusEvent;
+                    let msg = match event {
+                        ChannelBusEvent::UserMessage { channel, sender_name, text } => {
+                            serde_json::json!({
+                                "type": "channel_user_message",
+                                "channel": channel,
+                                "sender_name": sender_name,
+                                "content": text,
+                            })
+                        }
+                        ChannelBusEvent::ToolStarted { name } => {
+                            serde_json::json!({
+                                "type": "channel_tool_started",
+                                "tool": name,
+                            })
+                        }
+                        ChannelBusEvent::TextDelta { text } => {
+                            serde_json::json!({
+                                "type": "channel_text_delta",
+                                "content": text,
+                            })
+                        }
+                        ChannelBusEvent::Done { response } => {
+                            serde_json::json!({
+                                "type": "channel_done",
+                                "content": response,
+                            })
+                        }
+                        ChannelBusEvent::Error { message } => {
+                            serde_json::json!({
+                                "type": "channel_error",
+                                "content": message,
+                            })
+                        }
+                    };
+                    if send_json(&sender_clone, &msg).await.is_err() {
+                        break; // Client disconnected
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Receiver fell behind — continue with next available event
+                    continue;
+                }
+            }
+        }
+    });
+
     // Per-connection rate limiting: max 10 messages per 60 seconds
     let mut msg_times: Vec<std::time::Instant> = Vec::new();
     const MAX_PER_MIN: usize = 10;
@@ -380,6 +436,7 @@ async fn handle_agent_ws(
 
     // Cleanup
     update_handle.abort();
+    channel_bus_handle.abort();
     info!(agent_id = %id_str, "WebSocket disconnected");
 }
 

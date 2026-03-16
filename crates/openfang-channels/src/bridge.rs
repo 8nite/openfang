@@ -250,6 +250,44 @@ pub trait ChannelBridgeHandle: Send + Sync {
     async fn a2a_agents_text(&self) -> String {
         "A2A agents not available.".to_string()
     }
+
+    // ── Channel bus (bidirectional mirroring) ──
+
+    /// Subscribe to the per-agent channel bus.
+    ///
+    /// Returns a `broadcast::Receiver` that receives `ChannelBusEvent`s published
+    /// during agent processing (user messages, tool starts, text deltas, responses).
+    /// Returns `None` if the implementation does not support a channel bus.
+    fn subscribe_channel_events(
+        &self,
+        _agent_id: AgentId,
+    ) -> Option<tokio::sync::broadcast::Receiver<openfang_types::event::ChannelBusEvent>> {
+        None
+    }
+
+    /// Publish a channel bus event for an agent (fire-and-forget).
+    ///
+    /// No-op if there are no subscribers or if the bus is not supported.
+    fn publish_channel_event(
+        &self,
+        _agent_id: AgentId,
+        _event: openfang_types::event::ChannelBusEvent,
+    ) {
+        // Default: no-op
+    }
+
+    /// Send a message to an agent, publishing streaming events to the channel bus.
+    ///
+    /// Publishes `ToolStarted`, `TextDelta`, and `Done`/`Error` events so that
+    /// dashboard WebSocket subscribers receive live agent activity from channel messages.
+    /// Default implementation falls back to `send_message()` without bus publishing.
+    async fn send_message_with_bus(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<String, String> {
+        self.send_message(agent_id, message).await
+    }
 }
 
 /// Per-channel rate limiter tracking message timestamps per user.
@@ -793,33 +831,46 @@ async fn dispatch_message(
         send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
     }
 
-    // Send to agent and relay response
+    // Publish incoming user message to the channel bus so the dashboard can mirror it.
+    handle.publish_channel_event(
+        agent_id,
+        openfang_types::event::ChannelBusEvent::UserMessage {
+            channel: ct_str.to_string(),
+            sender_name: message.sender.display_name.clone(),
+            text: text.clone(),
+        },
+    );
+
+    // Send to agent and relay response.
+    // Always use send_message_with_bus so streaming events (tool starts, text deltas)
+    // are published to the channel bus for dashboard mirroring.
+    // If verbose mode is on, also subscribe to the bus and forward ToolStarted events
+    // back to the user on the channel in real time.
     let verbose = router.is_verbose(&message.sender.platform_id);
-    let send_result = if verbose {
-        // Spawn a progress task: each tool call name arrives on progress_rx and is
-        // sent as a Telegram message immediately, giving real-time visibility.
-        let (progress_tx, mut progress_rx) =
-            tokio::sync::mpsc::unbounded_channel::<String>();
-        let progress_adapter = adapter_arc.clone();
-        let progress_user = message.sender.clone();
-        let progress_thread = thread_id.map(|s| s.to_string());
-        tokio::spawn(async move {
-            while let Some(tool_name) = progress_rx.recv().await {
-                let msg = format!("⚙️ <code>{tool_name}</code>…");
-                let content = ChannelContent::Text(msg);
-                if let Some(ref tid) = progress_thread {
-                    let _ = progress_adapter.send_in_thread(&progress_user, content, tid).await;
-                } else {
-                    let _ = progress_adapter.send(&progress_user, content).await;
+    if verbose {
+        if let Some(mut bus_rx) = handle.subscribe_channel_events(agent_id) {
+            let progress_adapter = adapter_arc.clone();
+            let progress_user = message.sender.clone();
+            let progress_thread = thread_id.map(|s| s.to_string());
+            tokio::spawn(async move {
+                while let Ok(event) = bus_rx.recv().await {
+                    use openfang_types::event::ChannelBusEvent;
+                    if let ChannelBusEvent::ToolStarted { name } = event {
+                        let msg = format!("⚙️ <code>{name}</code>…");
+                        let content = ChannelContent::Text(msg);
+                        if let Some(ref tid) = progress_thread {
+                            let _ = progress_adapter
+                                .send_in_thread(&progress_user, content, tid)
+                                .await;
+                        } else {
+                            let _ = progress_adapter.send(&progress_user, content).await;
+                        }
+                    }
                 }
-            }
-        });
-        handle
-            .send_message_with_progress(agent_id, &text, progress_tx)
-            .await
-    } else {
-        handle.send_message(agent_id, &text).await
-    };
+            });
+        }
+    }
+    let send_result = handle.send_message_with_bus(agent_id, &text).await;
     match send_result {
         Ok(response) => {
             if lifecycle_reactions {

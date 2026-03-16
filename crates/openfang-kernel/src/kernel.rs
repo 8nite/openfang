@@ -155,6 +155,9 @@ pub struct OpenFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent channel event bus — broadcasts live channel activity (user messages,
+    /// tool starts, text deltas, responses) to any subscribers (e.g. dashboard WebSocket).
+    pub channel_bus: dashmap::DashMap<AgentId, tokio::sync::broadcast::Sender<openfang_types::event::ChannelBusEvent>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<OpenFangKernel>>,
 }
@@ -1013,6 +1016,7 @@ impl OpenFangKernel {
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            channel_bus: dashmap::DashMap::new(),
             self_handle: OnceLock::new(),
         };
 
@@ -1560,6 +1564,34 @@ impl OpenFangKernel {
                 self.supervisor.record_panic();
                 Err(e)
             }
+        }
+    }
+
+    /// Subscribe to the per-agent channel bus.
+    ///
+    /// Returns a `broadcast::Receiver` that receives all `ChannelBusEvent`s
+    /// published for the given agent (user messages, tool starts, text deltas, etc.).
+    /// If no sender exists yet, one is created with a capacity of 128 events.
+    pub fn subscribe_channel_bus(
+        &self,
+        agent_id: AgentId,
+    ) -> tokio::sync::broadcast::Receiver<openfang_types::event::ChannelBusEvent> {
+        self.channel_bus
+            .entry(agent_id)
+            .or_insert_with(|| tokio::sync::broadcast::channel(128).0)
+            .subscribe()
+    }
+
+    /// Publish a `ChannelBusEvent` for an agent.
+    ///
+    /// Silently drops the event if there are no current subscribers.
+    pub fn publish_channel_bus(
+        &self,
+        agent_id: AgentId,
+        event: openfang_types::event::ChannelBusEvent,
+    ) {
+        if let Some(tx) = self.channel_bus.get(&agent_id) {
+            let _ = tx.send(event);
         }
     }
 

@@ -109,6 +109,60 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(result.response)
     }
 
+    fn subscribe_channel_events(
+        &self,
+        agent_id: AgentId,
+    ) -> Option<tokio::sync::broadcast::Receiver<openfang_types::event::ChannelBusEvent>> {
+        Some(self.kernel.subscribe_channel_bus(agent_id))
+    }
+
+    fn publish_channel_event(
+        &self,
+        agent_id: AgentId,
+        event: openfang_types::event::ChannelBusEvent,
+    ) {
+        self.kernel.publish_channel_bus(agent_id, event);
+    }
+
+    async fn send_message_with_bus(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<String, String> {
+        use openfang_runtime::llm_driver::StreamEvent;
+        use openfang_types::event::ChannelBusEvent;
+
+        let (mut rx, task) = self
+            .kernel
+            .send_message_streaming(agent_id, message, None)
+            .map_err(|e| format!("{e}"))?;
+
+        let kernel = self.kernel.clone();
+        while let Some(event) = rx.recv().await {
+            let bus_event = match event {
+                StreamEvent::ToolUseStart { name, .. } => Some(ChannelBusEvent::ToolStarted { name }),
+                StreamEvent::TextDelta { text } => Some(ChannelBusEvent::TextDelta { text }),
+                _ => None,
+            };
+            if let Some(be) = bus_event {
+                kernel.publish_channel_bus(agent_id, be);
+            }
+        }
+
+        let result = task
+            .await
+            .map_err(|e| format!("task join: {e}"))?
+            .map_err(|e| format!("{e}"))?;
+
+        kernel.publish_channel_bus(
+            agent_id,
+            ChannelBusEvent::Done {
+                response: result.response.clone(),
+            },
+        );
+        Ok(result.response)
+    }
+
     async fn send_message_with_blocks(
         &self,
         agent_id: AgentId,
