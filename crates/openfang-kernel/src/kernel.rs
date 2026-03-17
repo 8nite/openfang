@@ -5534,10 +5534,25 @@ impl KernelHandle for OpenFangKernel {
     }
 
     async fn task_complete(&self, task_id: &str, result: &str) -> Result<(), String> {
-        self.memory
+        let (title, created_by) = self
+            .memory
             .task_complete(task_id, result)
             .await
-            .map_err(|e| format!("Task complete failed: {e}"))
+            .map_err(|e| format!("Task complete failed: {e}"))?;
+        // Notify the agent that created the task so it knows the work is done.
+        if !created_by.is_empty() {
+            let msg = format!(
+                "Task completed: \"{title}\"\nResult: {result}"
+            );
+            if let Err(e) = self.send_to_agent(&created_by, &msg).await {
+                tracing::warn!(
+                    task_id,
+                    created_by,
+                    "Failed to notify creator of task completion: {e}"
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {

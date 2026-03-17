@@ -492,7 +492,8 @@ impl MemorySubstrate {
     }
 
     /// Mark a task as completed with a result string.
-    pub async fn task_complete(&self, task_id: &str, result: &str) -> OpenFangResult<()> {
+    /// Returns `(title, created_by)` so the kernel can notify the creator.
+    pub async fn task_complete(&self, task_id: &str, result: &str) -> OpenFangResult<(String, String)> {
         let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
         let result = result.to_string();
@@ -500,6 +501,14 @@ impl MemorySubstrate {
         tokio::task::spawn_blocking(move || {
             let now = chrono::Utc::now().to_rfc3339();
             let db = conn.lock().map_err(|e| OpenFangError::Internal(e.to_string()))?;
+            // Fetch title and created_by before updating
+            let (title, created_by): (String, String) = db
+                .query_row(
+                    "SELECT title, created_by FROM task_queue WHERE id = ?1",
+                    rusqlite::params![task_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| OpenFangError::Internal(format!("Task not found: {e}")))?;
             let rows = db.execute(
                 "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3 WHERE id = ?1",
                 rusqlite::params![task_id, result, now],
@@ -507,7 +516,7 @@ impl MemorySubstrate {
             if rows == 0 {
                 return Err(OpenFangError::Internal(format!("Task not found: {task_id}")));
             }
-            Ok(())
+            Ok((title, created_by))
         })
         .await
         .map_err(|e| OpenFangError::Internal(e.to_string()))?
