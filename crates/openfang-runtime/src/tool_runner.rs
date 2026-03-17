@@ -221,17 +221,22 @@ pub async fn execute_tool(
         "shell_exec" => {
             let command = input["command"].as_str().unwrap_or("");
 
-            // SECURITY: Always check for shell metacharacters, even in Full mode.
-            // These enable command injection regardless of exec policy.
-            if let Some(reason) = crate::subprocess_sandbox::contains_shell_metacharacters(command) {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: format!(
-                        "shell_exec blocked: command contains {reason}. \
-                         Shell metacharacters are never allowed."
-                    ),
-                    is_error: true,
-                };
+            // SECURITY: Check for shell metacharacters unless exec_policy is Full.
+            // Full mode grants the agent explicit shell access (e.g. chaining with &&, pipes).
+            let is_full_exec_pre = exec_policy
+                .is_some_and(|p| p.mode == openfang_types::config::ExecSecurityMode::Full);
+            if !is_full_exec_pre {
+                if let Some(reason) = crate::subprocess_sandbox::contains_shell_metacharacters(command) {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "shell_exec blocked: command contains {reason}. \
+                             Shell metacharacters are not allowed in this exec policy mode. \
+                             Set exec_policy.mode = 'full' in the agent manifest to enable chained commands."
+                        ),
+                        is_error: true,
+                    };
+                }
             }
 
             // Exec policy enforcement (allowlist / deny / full)
@@ -251,9 +256,7 @@ pub async fn execute_tool(
                 }
             }
             // Skip heuristic taint patterns for Full exec policy (e.g. hand agents that need curl)
-            let is_full_exec = exec_policy
-                .is_some_and(|p| p.mode == openfang_types::config::ExecSecurityMode::Full);
-            if !is_full_exec {
+            if !is_full_exec_pre {
                 if let Some(violation) = check_taint_shell_exec(command) {
                     return ToolResult {
                         tool_use_id: tool_use_id.to_string(),
